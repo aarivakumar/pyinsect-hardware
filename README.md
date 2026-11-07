@@ -44,5 +44,14 @@ cd webapp && python3 -m http.server 8000
 ```
 Open `http://localhost:8000`. The first time you press **Capture Dataset**, pick the ESP32's port (often "USB JTAG/serial debug unit"). After that it reconnects automatically. Close the Arduino Serial Monitor first, because only one program can use the port at a time.
 
+### Linux (Ubuntu) setup — once per computer
+Linux doesn't let programs use USB serial ports until you give permission. Run this once (it asks for your password):
+
+```bash
+bash scripts/setup-linux-serial.sh
+```
+
+The script installs a udev rule, so the logged-in user can use ESP32 serial ports (Espressif native USB, CH340 and CP210x) when they're plugged in. It also adds you to the `dialout` group, reloads udev, and checks that the port works. You don't need to log out. Then unplug and replug the ESP32 and reload the page. The script also gives Chromium Snap USB access if you have it, and warns you if `brltty` is likely to grab a CH340 board.
+
 ### First-time calibration
 A 360° servo can't sense its position, so it turns for a set time. Connect the turntable, open **Calibrate turntable** and press **Spin 360°**. If it turns too far, lower *Time for one full spin*. If it stops short, raise it. Then press **Save**. The setting is stored on the ESP32. If the turntable creeps when it should be still, adjust *Stop trim*.

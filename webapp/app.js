@@ -95,6 +95,13 @@ function fmtDuration(sec) {
 /*   ?       status                    -> "ms=6000 v=100 t=0"          */
 /* Lines starting with "#" are log messages and are ignored.           */
 /* ------------------------------------------------------------------ */
+function openHelp() {
+  const linux = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
+  return new Error(linux
+    ? "Couldn't open the turntable's USB port. Linux needs a one-time permission setup: in the project folder run  bash scripts/setup-linux-serial.sh  then unplug and replug the ESP32. Also close the Arduino Serial Monitor."
+    : "Couldn't open the turntable's USB port. Close the Arduino Serial Monitor (or any other program using it), unplug and replug the ESP32, and try again.");
+}
+
 class Turntable {
   constructor() {
     this.port = null;
@@ -126,7 +133,16 @@ class Turntable {
     }
     if (this.connected) return;
     port = port || await navigator.serial.requestPort();
-    await port.open({ baudRate: 115200 });
+    try {
+      await port.open({ baudRate: 115200 });
+    } catch (err) {
+      if (err.name === 'InvalidStateError') {
+        // already open in this tab, e.g. after a failed attempt: close and retry once
+        try { await port.close(); await port.open({ baudRate: 115200 }); } catch (_) { throw openHelp(); }
+      } else {
+        throw openHelp();
+      }
+    }
     this.port = port;
     this.writer = port.writable.getWriter();
     this.readDone = this._readLoop(port);
