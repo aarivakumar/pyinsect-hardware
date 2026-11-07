@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14241b">
+  <title>PyInsect Data Collector</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+
+<!-- ============ INTRO ============ -->
+<main id="screen-intro" class="screen active">
+  <header class="hero">
+    <h1>PyInsect <span>Data Collector</span></h1>
+    <p>Put an insect on the turntable and plug the turntable into this device with USB. The app spins the insect, changes the lighting and takes the photos for you.</p>
+  </header>
+
+  <ol class="steps">
+    <li>
+      <b>Step 1 · Capture</b>
+      Press <em>Capture Dataset</em>. The turntable spins while the lighting changes automatically, and 500 photos are taken in 8 seconds. Use the slider to change the time.
+    </li>
+    <li>
+      <b>Step 2 · Review</b>
+      When it's finished you'll see a gallery of every photo that was taken. Tap a photo to remove it.
+    </li>
+    <li>
+      <b>Step 3 · Name</b>
+      Give the folder the insect's name and save it.
+    </li>
+  </ol>
+
+  <div class="launch">
+    <button id="capture" class="primary big">Capture Dataset</button>
+    <label class="slider">
+      <span>Time to take all 500 photos <output id="interval-out">8 s</output></span>
+      <input type="range" id="interval" min="4" max="30" step="1" value="8">
+    </label>
+    <p id="estimate" class="hint center"></p>
+  </div>
+
+  <section class="card turntable-card">
+    <div class="card-head">
+      <h2>Turntable (USB)</h2>
+      <span id="tt-status" class="pill">Not connected</span>
+    </div>
+    <p class="hint">Pressing <em>Capture Dataset</em> asks you to pick the ESP32's serial port the first time. After that it reconnects automatically.</p>
+    <button id="tt-connect" class="secondary wide">Connect turntable</button>
+    <details class="calibrate">
+      <summary>Calibrate turntable</summary>
+      <p class="hint">A 360° servo doesn't know its position, so it turns for a set time. Press <em>Spin 360°</em>. If it turns too far, lower the time. If it stops short, raise it. Then press <em>Save</em>.</p>
+      <label class="field">Time for one full spin (ms)
+        <input id="cal-ms" type="number" inputmode="numeric" min="500" max="60000" step="50" value="6000">
+      </label>
+      <label class="field">Speed (higher is faster, negative reverses)
+        <input id="cal-speed" type="number" inputmode="numeric" min="-500" max="500" step="5" value="100">
+      </label>
+      <label class="field">Stop trim (change if it creeps when it should stop)
+        <input id="cal-trim" type="number" inputmode="numeric" min="-100" max="100" step="1" value="0">
+      </label>
+      <div class="btn-row">
+        <button type="button" id="cal-save" class="primary">Save</button>
+        <button type="button" id="cal-stop" class="danger">Stop</button>
+        <button type="button" id="cal-90" class="secondary">Spin 90°</button>
+        <button type="button" id="cal-360" class="secondary">Spin 360°</button>
+      </div>
+    </details>
+  </section>
+</main>
+
+<!-- ============ CAPTURE ============ -->
+<main id="screen-camera" class="screen camera">
+  <div id="light-overlay" aria-hidden="true"></div>
+  <video id="video" playsinline muted autoplay></video>
+  <span id="run-tt" class="glass run-pill"></span>
+  <img id="last-shot" class="last-shot" alt="" hidden>
+
+  <section class="panel run">
+    <div class="hud-top">
+      <span class="step-tag">Step 1 · Capturing</span>
+      <span id="hud-count">0 / 500</span>
+    </div>
+    <div class="bar"><div id="hud-bar"></div></div>
+    <p id="hud-main" class="hud-main">Starting camera…</p>
+    <p id="hud-sub" class="hud-sub"></p>
+    <button id="stop" class="danger wide">Stop</button>
+  </section>
+</main>
+
+<!-- ============ GALLERY ============ -->
+<main id="screen-gallery" class="screen">
+  <header class="page-head">
+    <span class="step-tag">Step 2 · Review</span>
+    <h2>Your photos</h2>
+    <p id="gallery-count" class="hint"></p>
+  </header>
+  <div id="gallery" class="gallery"></div>
+  <div class="footer-bar">
+    <button id="gallery-restart" class="secondary">Start over</button>
+    <button id="gallery-next" class="primary">Next: name folder</button>
+  </div>
+</main>
+
+<!-- ============ NAME ============ -->
+<main id="screen-name" class="screen">
+  <header class="page-head">
+    <span class="step-tag">Step 3 · Name</span>
+    <h2>Which insect is this?</h2>
+    <p class="hint">This becomes the folder name for the photos.</p>
+  </header>
+  <section class="card">
+    <label class="field">Folder name
+      <input id="folder-name" type="text" placeholder="e.g. ladybug" autocomplete="off" autocapitalize="none" maxlength="60">
+    </label>
+    <p id="name-preview" class="hint mono"></p>
+    <button id="save-zip" class="primary wide" disabled>Save folder (.zip)</button>
+    <button id="share-zip" class="secondary wide" hidden disabled>Share…</button>
+    <p id="save-status" class="hint"></p>
+  </section>
+  <div class="footer-bar">
+    <button id="name-back" class="secondary">Back to gallery</button>
+    <button id="name-new" class="secondary">Collect another insect</button>
+  </div>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
