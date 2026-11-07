@@ -4,7 +4,8 @@
 
 ```
 webapp/                 phone web app (plain HTML/CSS/JS, no build step)
-firmware/turntable/     Arduino sketch for the ESP32-C3 + 360° servo turntable
+firmware/turntable/main.py       MicroPython controller used by the web app
+firmware/turntable/turntable.ino  Arduino alternative for the ESP32-C3
 ```
 
 ## User flow
@@ -21,19 +22,25 @@ firmware/turntable/     Arduino sketch for the ESP32-C3 + 360° servo turntable
 
 | Servo wire | Connect to |
 |---|---|
-| Signal (orange / yellow / white) | GPIO4 (`D2` on XIAO ESP32C3, `4` on C3 SuperMini). Change `SERVO_PIN` if you use another pin |
+| Signal (orange / yellow / white) | GPIO6 (board pin marked `6`). Change `SERVO_PIN` in the sketch if you use another pin |
 | + (red) | **5V** (USB 5V / VBUS pin), **never 3V3** |
 | − (brown / black) | GND |
+
+The firmware drives a continuous-rotation servo at 50 Hz: 1750 µs turns forward, 1250 µs turns in reverse, and 1500 µs stops. The slower default speed offset is +250 µs; set it to −250 µs in calibration to reverse direction.
 
 - Small 360° servos (SG90/MG90-type) can run from the board's 5V pin while it's on USB. For bigger servos (MG995/MG996R), use a separate 5V supply rated at 2 A or more, and connect its GND to the ESP32's GND.
 - A 470 µF capacitor across the servo's 5V and GND helps stop resets when the motor starts.
 - Avoid GPIO 2, 8 and 9 for the servo. They're strapping pins on the ESP32-C3.
 
-### Flashing the firmware
-1. Arduino IDE → install the **esp32** board package (Espressif) and the **ESP32Servo** library.
-2. Choose your ESP32-C3 board and set *Tools → USB CDC On Boot → Enabled*.
-3. Open `firmware/turntable/turntable.ino` and upload it.
-4. Open the Serial Monitor at 115200 baud and type `R90` to test. The turntable should turn about a quarter turn.
+### Installing the MicroPython controller
+The web app expects the controller to run on the ESP32-C3's USB serial connection. The ESP32-C3 must already have MicroPython installed.
+
+1. Install `mpremote` from the repository folder: `python -m pip install mpremote`.
+2. Close the web app's serial connection and any serial monitor.
+3. Copy the controller to the board as `main.py`: `python -m mpremote connect COM4 fs cp firmware/turntable/main.py :main.py`.
+4. Restart the board so `main.py` starts: `python -m mpremote connect COM4 reset`.
+
+The Arduino sketch is an alternative controller. To use it instead, install the Espressif **esp32** board package and **ESP32Servo** library, select **ESP32-C3 Dev Module**, enable **USB CDC On Boot**, then upload `firmware/turntable/turntable.ino`. Use only one controller at a time.
 
 ## Running the web app
 

@@ -15,7 +15,9 @@
  * Lines starting with "#" are log messages; the web app ignores them.
  * You can type the same commands in the Arduino Serial Monitor (115200, Newline) to test.
  *
- * A 360° servo has no position sensor: speed is set by pulse width (1500 µs = stop),
+ * A 360° servo has no position sensor: the slower defaults are 1750 µs forward,
+ * 1250 µs reverse, and 1500 µs stop at 50 Hz. The speed offset defaults to +250 µs.
+ * Speed is set by pulse width (1500 µs = stop),
  * so "rotate N degrees" = "spin for N/360 × msPerRev milliseconds". Calibrate msPerRev
  * from the web app (Calibrate turntable → Spin 360°).
  *
@@ -29,9 +31,9 @@
 #include <Preferences.h>
 
 // ---------- Settings you may need to change ----------
-// Servo signal (orange/yellow/white) wire. GPIO4 = "D2" on a Seeed XIAO ESP32C3, "4" on a C3 SuperMini.
+// Servo signal (orange/yellow/white) wire. Connect to GPIO6 (board pin marked 6).
 // Avoid GPIO 2, 8 and 9 on the ESP32-C3. These are strapping pins and can stop the board from booting.
-static const int SERVO_PIN = 4;
+static const int SERVO_PIN = 6;
 static const int NEUTRAL_US = 1500;   // standard servo "stop" pulse
 
 // ---------- State ----------
@@ -39,7 +41,7 @@ Servo servo;
 Preferences prefs;
 
 int msPerRev = 6000;                  // time for one full 360° spin at speedUs
-int speedUs  = 100;                   // pulse offset from neutral while moving
+int speedUs  = 250;                   // pulse offset: +250 = 1750 µs forward, -250 = 1250 µs reverse
 int trimUs   = 0;                     // neutral correction
 
 bool moving = false;
@@ -126,6 +128,11 @@ void setup() {
   prefs.begin("turntable", false);
   msPerRev = prefs.getInt("ms", msPerRev);
   speedUs  = prefs.getInt("v", speedUs);
+  // Migrate older +100/+500 µs defaults to the slower +250 µs pulse once.
+  if (speedUs == 100 || speedUs == 500) {
+    speedUs = 250;
+    prefs.putInt("v", speedUs);
+  }
   trimUs   = prefs.getInt("t", trimUs);
 
   // Attach and immediately send "stop" so a continuous servo doesn't spin on boot.

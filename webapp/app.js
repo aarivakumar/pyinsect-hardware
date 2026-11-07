@@ -102,7 +102,8 @@ class Turntable {
     this.reader = null;
     this.readDone = null;
     this.waiters = [];
-    this.info = { ms: 6000, v: 100, t: 0 };
+    this.info = { ms: 6000, v: 250, t: 0 };
+    this.moving = false;
     this.onchange = () => {};
   }
 
@@ -126,7 +127,14 @@ class Turntable {
     }
     if (this.connected) return;
     port = port || await navigator.serial.requestPort();
-    await port.open({ baudRate: 115200 });
+    try {
+      await port.open({ baudRate: 115200 });
+    } catch (err) {
+      if (['NetworkError', 'InvalidStateError', 'NotReadableError'].includes(err.name)) {
+        throw new Error('Could not open the serial port. Close Arduino Serial Monitor/Plotter, other serial tools, and other PyInsect tabs, then reconnect.');
+      }
+      throw err;
+    }
     this.port = port;
     this.writer = port.writable.getWriter();
     this.readDone = this._readLoop(port);
@@ -136,7 +144,20 @@ class Turntable {
     await sleep(300);
     let lastErr;
     for (let i = 0; i < 4; i++) {
-      try { await this.refresh(); return; } catch (err) { lastErr = err; }
+      try {
+        await this.refresh();
+        const speedMigrationKey = 'pyinsect-speed-v250-applied';
+        let speedMigrationApplied = false;
+        try { speedMigrationApplied = localStorage.getItem(speedMigrationKey) === '1'; } catch (_) {}
+        if (!speedMigrationApplied) {
+          if (this.info.v === 500) {
+            await this.command('V250');
+            await this.refresh();
+          }
+          try { localStorage.setItem(speedMigrationKey, '1'); } catch (_) {}
+        }
+        return;
+      } catch (err) { lastErr = err; }
     }
     await this.disconnect();
     throw new Error(`No answer from the turntable on that port. Is the PyInsect firmware uploaded? (${lastErr.message})`);
@@ -224,12 +245,24 @@ class Turntable {
 
   // Spin continuously for `ms` milliseconds (reply when it stops).
   spinFor(ms) {
-    return this.command(`D${Math.round(ms)}`, ms + 5000);
+    return this._move(`D${Math.round(ms)}`, ms + 5000);
   }
 
   rotate(deg) {
     const d = Math.round(deg * 100) / 100;
-    return this.command(`R${d}`, (this.info.ms * Math.abs(d)) / 360 + 5000);
+    return this._move(`R${d}`, (this.info.ms * Math.abs(d)) / 360 + 5000);
+  }
+
+  async _move(cmd, timeoutMs) {
+    if (this.moving) throw new Error('Turntable is already moving. Wait for it to stop or press Stop.');
+    this.moving = true;
+    this.onchange();
+    try {
+      return await this.command(cmd, timeoutMs);
+    } finally {
+      this.moving = false;
+      this.onchange();
+    }
   }
 
   stop() { return this.command('S').catch(() => {}); }
@@ -244,7 +277,10 @@ function renderTurntable() {
   s.classList.toggle('ok', on);
   $('#tt-connect').textContent = on ? 'Disconnect' : 'Connect turntable';
   $('#tt-connect').disabled = !Turntable.supported || state.running;
-  for (const id of ['#cal-save', '#cal-90', '#cal-360', '#cal-stop']) $(id).disabled = !on;
+  $('#cal-save').disabled = !on || turntable.moving;
+  $('#cal-90').disabled = !on || turntable.moving;
+  $('#cal-360').disabled = !on || turntable.moving;
+  $('#cal-stop').disabled = !on;
   if (on) {
     $('#cal-ms').value = turntable.info.ms;
     $('#cal-speed').value = turntable.info.v;
