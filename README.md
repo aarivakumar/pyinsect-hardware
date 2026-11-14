@@ -46,6 +46,8 @@ The Arduino sketch is an alternative controller. To use it instead, install the 
 
 The turntable connects over **USB serial** using Web Serial, which works in **Chrome or Edge on a computer**. Plug the ESP32 into the same computer that runs the app.
 
+**Android phones (Samsung Galaxy etc.):** use **Chrome** and a plain **USB-C to USB-C cable** from the phone to the ESP32-C3's USB-C port. The app uses WebUSB there. Press *Connect turntable*, pick the ESP32 and tap *Allow*. If the ESP32 board has its own 5V supply, use it for big servos, since a phone gives limited power.
+
 ```
 cd webapp && python3 -m http.server 8000
 ```

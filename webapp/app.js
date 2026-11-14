@@ -133,7 +133,7 @@ class UsbSerialPort {
     this.ctrlIf = comm ? comm.interfaceNumber : null;
     if (this.dataIf === null) {
       await d.close().catch(() => {});
-      const e = new Error('This USB device is not a serial (CDC) device.'); e.name = 'NetworkError'; throw e;
+      const e = new Error('That USB device is not the ESP32 turntable. Pick the entry for the ESP32 (often "USB JTAG/serial debug unit").'); e.name = 'NetworkError'; throw e;
     }
     try {
       if (this.ctrlIf !== null) await d.claimInterface(this.ctrlIf);
@@ -217,13 +217,13 @@ class Turntable {
     if (this.connected) return;
     if (!port) {
       if ('serial' in navigator) port = await navigator.serial.requestPort();
-      else port = new UsbSerialPort(await navigator.usb.requestDevice({ filters: [{ classCode: 0x02 }, { classCode: 0xef }, { vendorId: 0x303a }, { classCode: 0xff }] }));
+      else port = new UsbSerialPort(await navigator.usb.requestDevice({ filters: [] }));
     }
     try {
       await port.open({ baudRate: 115200 });
     } catch (err) {
       if (['NetworkError', 'InvalidStateError', 'NotReadableError'].includes(err.name)) {
-        throw new Error('Could not open the serial port. Close Arduino Serial Monitor/Plotter, other serial tools, and other PyInsect tabs, then reconnect. On a phone, use a USB OTG cable.');
+        throw new Error('Could not open the serial port. Close Arduino Serial Monitor/Plotter, other serial tools, and other PyInsect tabs, then reconnect. On a phone, use a USB-C to USB-C cable and unplug/replug the board if it was already connected.');
       }
       throw err;
     }
