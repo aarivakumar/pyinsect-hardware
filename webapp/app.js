@@ -13,21 +13,29 @@ const PHOTO_TARGET = 500;     // photos per dataset
 const DEFAULT_INTERVAL = 8;   // seconds the whole burst takes
 const WARMUP_MS = 1500;       // let the camera focus/expose before the burst starts
 
-// Lighting is picked automatically from what the camera supports.
-// Camera with a flashlight (phone back camera): flashlight + exposure changes.
-const TORCH_LIGHTS = [
-  { id: 'room',   label: 'Room light',        torch: false },
-  { id: 'flash',  label: 'Flashlight',        torch: true },
-  { id: 'dark',   label: 'Darker exposure',   torch: false, exposure: -1.5 },
-  { id: 'bright', label: 'Brighter exposure', torch: false, exposure: +1.5 },
+// Lighting changes automatically through many levels during the burst.
+// ev = exposure compensation (hardware, if the camera supports it); soft = software fallback
+// (negative = darker, positive = brighter) used when the camera has no exposure control.
+const CAMERA_LIGHTS = [
+  { id: 'normal',      label: 'Normal',          ev: 0,    soft: 0 },
+  { id: 'dim',         label: 'Dim',             ev: -1,   soft: -0.35 },
+  { id: 'dark',        label: 'Dark',            ev: -2,   soft: -0.6 },
+  { id: 'bright',      label: 'Bright',          ev: 1,    soft: 0.25 },
+  { id: 'verybright',  label: 'Very bright',     ev: 2,    soft: 0.5 },
+  { id: 'flash',       label: 'Flashlight',      ev: 0,    soft: 0,     torch: true },
+  { id: 'flashdim',    label: 'Flashlight dim',  ev: -1.5, soft: -0.4,  torch: true },
+  { id: 'flashbright', label: 'Flashlight bright', ev: 1.5, soft: 0.35, torch: true },
 ];
-// No flashlight (laptop webcam / front camera): the screen glows in different colours.
+// No flashlight (laptop webcam / front camera): the screen glows in different colours and levels.
 const SCREEN_LIGHTS = [
-  { id: 'white', label: 'Screen white', screen: '#ffffff' },
-  { id: 'warm',  label: 'Screen warm',  screen: '#ffb867' },
-  { id: 'cool',  label: 'Screen cool',  screen: '#8fc2ff' },
-  { id: 'room',  label: 'Room light',   screen: '#000000' },
+  { id: 'white',  label: 'Screen white',  screen: '#ffffff' },
+  { id: 'warm',   label: 'Screen warm',   screen: '#ffb867' },
+  { id: 'cool',   label: 'Screen cool',   screen: '#8fc2ff' },
+  { id: 'dim',    label: 'Screen dim',    screen: '#707070' },
+  { id: 'dark',   label: 'Screen dark',   screen: '#242424' },
+  { id: 'room',   label: 'Room light',    screen: '#000000' },
 ];
+const LIGHT_SETTLE_MS = 150;  // camera needs a moment before a new light shows up in frames
 
 const state = {
   photos: [],          // { blob, url, angle, light, lightLabel, time, removed }
@@ -359,10 +367,15 @@ async function startCamera() {
   const video = $('#video');
   video.srcObject = stream;
   await video.play();
-  await sleep(500); // some phones only report flashlight support once frames are flowing
-  state.caps = state.track.getCapabilities ? state.track.getCapabilities() : {};
   const facing = (state.track.getSettings && state.track.getSettings().facingMode) || '';
-  video.classList.toggle('mirror', facing === 'user');
+  state.facingUser = facing === 'user';
+  // Some phones only report flashlight support once frames are flowing, so look for up to 1.5 s.
+  for (let i = 0; i < 6; i++) {
+    await sleep(250);
+    state.caps = state.track.getCapabilities ? state.track.getCapabilities() : {};
+    if (state.caps.torch) break;
+  }
+  video.classList.toggle('mirror', state.facingUser);
 }
 
 function stopCamera() {
@@ -373,12 +386,12 @@ function stopCamera() {
 }
 
 function autoLights() {
-  if (state.caps.torch) {
-    return TORCH_LIGHTS.filter(l => !l.exposure || state.caps.exposureCompensation);
-  }
-  return SCREEN_LIGHTS;
+  // Phones often report the flashlight only after frames start flowing — caps are re-read in startCamera.
+  return state.caps.torch || state.caps.exposureCompensation ? CAMERA_LIGHTS.filter(l => state.caps.torch || !l.torch)
+       : (state.facingUser ? SCREEN_LIGHTS : CAMERA_LIGHTS.filter(l => !l.torch));
 }
 
+// Returns true once the hardware has been told to change. The software part is applied per photo.
 async function applyLight(light) {
   $('#light-overlay').style.background = (light && light.screen) || '#000';
   if (!state.track || (light && light.screen)) return;
@@ -386,11 +399,21 @@ async function applyLight(light) {
   if (state.caps.torch) adv.torch = !!(light && light.torch);
   if (state.caps.exposureCompensation) {
     const { min, max } = state.caps.exposureCompensation;
-    adv.exposureCompensation = Math.max(min, Math.min(max, (light && light.exposure) || 0));
+    adv.exposureCompensation = Math.max(min, Math.min(max, (light && light.ev) || 0));
   }
   if (Object.keys(adv).length) {
     try { await state.track.applyConstraints({ advanced: [adv] }); } catch (_) { /* best effort */ }
   }
+}
+
+// Software brightness, only for cameras with no exposure control, so the dataset still has dark/bright photos.
+function softLevel(light) {
+  return state.caps.exposureCompensation || light.screen ? 0 : (light.soft || 0);
+}
+function applySoft(ctx, w, h, level) {
+  if (!level) return;
+  ctx.fillStyle = level < 0 ? `rgba(0,0,0,${-level})` : `rgba(255,255,255,${level})`;
+  ctx.fillRect(0, 0, w, h);
 }
 
 function grabFrame() {
@@ -430,6 +453,7 @@ async function runCapture() {
   const useTurntable = turntable.connected;
   if (!useTurntable && !confirm('The turntable is not connected.\n\nTake the photos anyway, without spinning?')) return;
 
+  try { if (!document.fullscreenElement) await document.documentElement.requestFullscreen(); } catch (_) {}
   state.running = true;
   state.abort = false;
   clearPhotos();
@@ -456,6 +480,7 @@ async function runCapture() {
     const durationMs = interval * 1000;
     const gapMs = durationMs / PHOTO_TARGET;        // 16 ms for 500 photos in 8 s
     const lightMs = durationMs / lights.length;     // each lighting gets an equal slice of the burst
+    let active = lights[0];                        // the light the camera is really showing right now
 
     // Count how many different frames the camera really delivers.
     let frames = 0, counting = true;
@@ -481,10 +506,15 @@ async function runCapture() {
 
       const elapsed = performance.now() - t0;
       const li = Math.min(lights.length - 1, Math.floor(elapsed / lightMs));
-      if (li !== lightIdx) { lightIdx = li; applyLight(lights[li]); } // don't wait, keep the burst on time
-      const light = lights[lightIdx];
+      if (li !== lightIdx) { // don't wait, keep the burst on time
+        lightIdx = li;
+        const next = lights[li];
+        applyLight(next).then(() => sleep(LIGHT_SETTLE_MS)).then(() => { if (lights[lightIdx] === next) active = next; });
+      }
+      const light = active;
 
       ctx.drawImage(video, 0, 0);
+      applySoft(ctx, canvas.width, canvas.height, softLevel(light));
       const angle = useTurntable ? Math.round(((elapsed / turntable.info.ms) * 360 % 360) * 10) / 10 : 0;
       const photo = { blob: null, url: '', angle, light: light.id, lightLabel: light.label, time: new Date(), removed: false };
       state.photos.push(photo);
@@ -531,6 +561,7 @@ async function runCapture() {
     if (useTurntable && state.abort) await turntable.stop();
     await applyLight(null);
     stopCamera();
+    try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (_) {}
     await keepScreenOn(false);
     state.running = false;
     renderTurntable();
