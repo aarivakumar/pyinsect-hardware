@@ -19,6 +19,11 @@ import sys
 import time
 
 try:
+    import bluetooth
+except ImportError:
+    bluetooth = None
+
+try:
     import select
 except ImportError:
     import uselect as select
@@ -86,8 +91,70 @@ def move_servo(duration_ms):
     write_pulse_us(NEUTRAL_US + trim_us + speed_us)
 
 
+# ---- Bluetooth LE serial (Nordic UART service), so a phone needs no cable ----
+BLE_NAME = "PyInsect"
+UART_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+UART_RX_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  # phone -> board
+UART_TX_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  # board -> phone
+ble = None
+ble_conns = set()
+ble_in = bytearray()
+ble_tx = None
+ble_rx = None
+
+
+def ble_advertise():
+    name = BLE_NAME.encode()
+    adv = bytes((2, 0x01, 0x06, len(name) + 1, 0x09)) + name
+    uuid = bytes(bluetooth.UUID(UART_SERVICE_UUID))
+    resp = bytes((len(uuid) + 1, 0x07)) + uuid
+    ble.gap_advertise(100000, adv_data=adv, resp_data=resp)
+
+
+def ble_irq(event, data):
+    if event == 1:  # central connected
+        ble_conns.add(data[0])
+    elif event == 2:  # central disconnected
+        ble_conns.discard(data[0])
+        ble_advertise()
+    elif event == 3:  # write from the phone
+        if data[1] == ble_rx:
+            ble_in.extend(ble.gatts_read(ble_rx))
+
+
+def ble_start():
+    global ble, ble_tx, ble_rx
+    if bluetooth is None:
+        return
+    ble = bluetooth.BLE()
+    ble.active(True)
+    try:
+        ble.config(gap_name=BLE_NAME)
+    except (ValueError, OSError):
+        pass
+    service = (
+        bluetooth.UUID(UART_SERVICE_UUID),
+        (
+            (bluetooth.UUID(UART_TX_UUID), bluetooth.FLAG_NOTIFY),
+            (bluetooth.UUID(UART_RX_UUID), bluetooth.FLAG_WRITE | bluetooth.FLAG_WRITE_NO_RESPONSE),
+        ),
+    )
+    ((ble_tx, ble_rx),) = ble.gatts_register_services((service,))
+    ble.irq(ble_irq)
+    ble_advertise()
+
+
 def reply(message):
     print(message)
+    if ble is None or not ble_conns:
+        return
+    data = (message + "\n").encode()
+    for conn in list(ble_conns):
+        for i in range(0, len(data), 20):
+            try:
+                ble.gatts_notify(conn, ble_tx, data[i:i + 20])
+            except OSError:
+                break
 
 
 def handle_command(line):
@@ -200,11 +267,28 @@ def handle_command(line):
 
 
 stop_servo()
+try:
+    ble_start()
+except Exception as err:  # keep USB working even if Bluetooth fails
+    ble = None
+    print("# Bluetooth unavailable:", err)
 poller = select.poll()
 poller.register(sys.stdin, select.POLLIN)
 reply("# PyInsect Turntable ready on GPIO{} ms={} v={} t={}".format(
     SERVO_PIN, ms_per_rev, speed_us, trim_us
 ))
+
+def feed(char):
+    global input_buffer
+    if char == "\r" or char == "\n":
+        if input_buffer:
+            handle_command(input_buffer)
+            input_buffer = ""
+    elif len(input_buffer) < 31:
+        input_buffer += char
+    else:
+        input_buffer = ""
+
 
 while True:
     # Read available characters without blocking the movement timer.
@@ -214,14 +298,10 @@ while True:
         char = sys.stdin.read(1)
         if not char:
             break
-        if char == "\r" or char == "\n":
-            if input_buffer:
-                handle_command(input_buffer)
-                input_buffer = ""
-        elif len(input_buffer) < 31:
-            input_buffer += char
-        else:
-            input_buffer = ""
+        feed(char)
+
+    while ble_in:
+        feed(chr(ble_in.pop(0)))
 
     if moving and time.ticks_diff(time.ticks_ms(), move_start) >= move_duration:
         stop_servo()
