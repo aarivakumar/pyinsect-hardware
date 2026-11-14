@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#14241b">
-  <title>PyInsect Data Collector</title>
+  <title>PyInsect</title>
   <link rel="stylesheet" href="style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="app.js" defer></script>
@@ -14,29 +14,20 @@
 <!-- ============ INTRO ============ -->
 <main id="screen-intro" class="screen active">
   <header class="hero">
-    <h1>PyInsect <span>Data Collector</span></h1>
-    <p>Put an insect on the turntable and plug the turntable into this device with USB. The app spins the insect, changes the lighting and takes the photos for you.</p>
+    <h1>PyInsect</h1>
+    <p>Put the insect on the turntable and press the button. Photos are taken while it spins and the light changes by itself.</p>
   </header>
 
   <ol class="steps">
-    <li>
-      <b>Step 1 · Capture</b>
-      Press <em>Capture Dataset</em>. The turntable spins while the lighting changes automatically, and 500 photos are taken in 8 seconds. Use the slider to change the time.
-    </li>
-    <li>
-      <b>Step 2 · Review</b>
-      When it's finished you'll see a gallery of every photo that was taken. Tap a photo to remove it.
-    </li>
-    <li>
-      <b>Step 3 · Name</b>
-      Give the folder the insect's name and save it.
-    </li>
+    <li><b>1 · Capture</b>500 photos are taken while the turntable spins and the lighting changes (dim, dark, bright, flashlight).</li>
+    <li><b>2 · Review</b>Look through the photos. Tap one to remove it.</li>
+    <li><b>3 · Save</b>Name the folder after the insect and save it as a .zip.</li>
   </ol>
 
   <div class="launch">
-    <button id="capture" class="primary big">Capture Dataset</button>
+    <button id="capture" class="primary big">Take photos</button>
     <label class="slider">
-      <span>Time to take all 500 photos <output id="interval-out">8 s</output></span>
+      <span>Time <output id="interval-out">8 s</output></span>
       <input type="range" id="interval" min="4" max="30" step="1" value="8">
     </label>
     <p id="estimate" class="hint center"></p>
@@ -44,21 +35,19 @@
 
   <section class="card turntable-card">
     <div class="card-head">
-      <h2>Turntable (USB)</h2>
+      <h2>Turntable</h2>
       <span id="tt-status" class="pill">Not connected</span>
     </div>
-    <p class="hint">Pressing <em>Capture Dataset</em> asks you to pick the ESP32's serial port the first time. After that it reconnects automatically.</p>
     <button id="tt-connect" class="secondary wide">Connect turntable</button>
     <details class="calibrate">
-      <summary>Calibrate turntable</summary>
-      <p class="hint">A 360° servo doesn't know its position, so it turns for a set time. Press <em>Spin 360°</em>. If it turns too far, lower the time. If it stops short, raise it. Then press <em>Save</em>.</p>
+      <summary>Calibrate</summary>
       <label class="field">Time for one full spin (ms)
         <input id="cal-ms" type="number" inputmode="numeric" min="500" max="60000" step="50" value="6000">
       </label>
-      <label class="field">Speed (higher is faster, negative reverses)
+      <label class="field">Speed (negative reverses)
         <input id="cal-speed" type="number" inputmode="numeric" min="-500" max="500" step="5" value="250">
       </label>
-      <label class="field">Stop trim (change if it creeps when it should stop)
+      <label class="field">Stop trim
         <input id="cal-trim" type="number" inputmode="numeric" min="-100" max="100" step="1" value="0">
       </label>
       <div class="btn-row">
@@ -80,7 +69,7 @@
 
   <section class="panel run">
     <div class="hud-top">
-      <span class="step-tag">Step 1 · Capturing</span>
+      <span class="step-tag">Taking photos</span>
       <span id="hud-count">0 / 500</span>
     </div>
     <div class="bar"><div id="hud-bar"></div></div>
@@ -93,7 +82,7 @@
 <!-- ============ GALLERY ============ -->
 <main id="screen-gallery" class="screen">
   <header class="page-head">
-    <span class="step-tag">Step 2 · Review</span>
+    <span class="step-tag">Review</span>
     <h2>Your photos</h2>
     <p id="gallery-count" class="hint"></p>
   </header>
@@ -107,10 +96,9 @@
 <!-- ============ NAME ============ -->
 <main id="screen-name" class="screen">
   <header class="page-head">
-    <span class="step-tag">Step 3 · Name</span>
+    <span class="step-tag">Save</span>
     <h2>Which insect is this?</h2>
-    <p class="hint">This becomes the folder name for the photos.</p>
-  </header>
+      </header>
   <section class="card">
     <label class="field">Folder name
       <input id="folder-name" type="text" placeholder="e.g. ladybug" autocomplete="off" autocapitalize="none" maxlength="60">
