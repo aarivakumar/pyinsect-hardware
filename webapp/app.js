@@ -193,15 +193,21 @@ class Turntable {
 
   get connected() { return !!(this.port && this.writer); }
 
-  // Web Serial on computers; WebUSB on Android phones (which have no Web Serial).
+  // Web Serial on computers; WebUSB on Android phones. Newer Chrome on Android
+  // has navigator.serial, but its picker does not list USB boards like the ESP32,
+  // so Android always uses WebUSB when it is available.
   static get supported() { return 'serial' in navigator || 'usb' in navigator; }
+  static get useWebSerial() {
+    const android = /Android/i.test(navigator.userAgent);
+    return 'serial' in navigator && !(android && 'usb' in navigator);
+  }
 
   // Reconnect to a port the user already allowed, without showing the picker.
   async autoConnect() {
     if (!Turntable.supported) return false;
     let ports = [];
     try {
-      if ('serial' in navigator) ports = await navigator.serial.getPorts();
+      if (Turntable.useWebSerial) ports = await navigator.serial.getPorts();
       else ports = (await navigator.usb.getDevices()).map(d => new UsbSerialPort(d));
     } catch (_) {}
     for (const port of ports) {
@@ -216,7 +222,7 @@ class Turntable {
     }
     if (this.connected) return;
     if (!port) {
-      if ('serial' in navigator) port = await navigator.serial.requestPort();
+      if (Turntable.useWebSerial) port = await navigator.serial.requestPort();
       else port = new UsbSerialPort(await navigator.usb.requestDevice({ filters: [] }));
     }
     try {
@@ -414,7 +420,7 @@ $('#cal-360').addEventListener('click', () => turntable.rotate(360).catch(err =>
 $('#cal-stop').addEventListener('click', () => turntable.stop());
 
 if (Turntable.supported) {
-  const usbApi = 'serial' in navigator ? navigator.serial : navigator.usb;
+  const usbApi = Turntable.useWebSerial ? navigator.serial : navigator.usb;
   usbApi.addEventListener('connect', () => { if (!turntable.connected) turntable.autoConnect(); });
 }
 
