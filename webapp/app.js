@@ -179,6 +179,46 @@ class UsbSerialPort {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Bluetooth LE serial (Nordic UART): no cable needed, works on phones */
+/* ------------------------------------------------------------------ */
+const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';  // phone -> board
+const NUS_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // board -> phone
+
+class BlePort {
+  constructor(device) { this.device = device; this.readable = null; this.writable = null; this.rx = null; }
+
+  async open() {
+    const server = await this.device.gatt.connect();
+    const service = await server.getPrimaryService(NUS_SERVICE);
+    this.rx = await service.getCharacteristic(NUS_RX);
+    const tx = await service.getCharacteristic(NUS_TX);
+    let onValue, onGone;
+    this.readable = new ReadableStream({
+      start: async (controller) => {
+        onValue = (e) => controller.enqueue(new Uint8Array(e.target.value.buffer.slice(e.target.value.byteOffset, e.target.value.byteOffset + e.target.value.byteLength)));
+        onGone = () => { try { controller.close(); } catch (_) {} };
+        tx.addEventListener('characteristicvaluechanged', onValue);
+        this.device.addEventListener('gattserverdisconnected', onGone);
+        await tx.startNotifications();
+      },
+      cancel: () => { tx.removeEventListener('characteristicvaluechanged', onValue); },
+    });
+    this.writable = new WritableStream({
+      write: async (chunk) => {
+        for (let i = 0; i < chunk.length; i += 20) {
+          await this.rx.writeValueWithoutResponse(chunk.slice(i, i + 20));
+        }
+      },
+    });
+  }
+
+  async close() {
+    try { if (this.device.gatt.connected) this.device.gatt.disconnect(); } catch (_) {}
+  }
+}
+
 class Turntable {
   constructor() {
     this.port = null;
@@ -194,9 +234,22 @@ class Turntable {
   get connected() { return !!(this.port && this.writer); }
 
   // Web Serial on computers; WebUSB on Android phones (which have no Web Serial).
-  static get supported() { return 'serial' in navigator || 'usb' in navigator; }
+  static get supported() { return 'serial' in navigator || 'usb' in navigator || 'bluetooth' in navigator; }
 
   // Reconnect to a port the user already allowed, without showing the picker.
+  static async pickBluetooth() {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'PyInsect' }],
+      optionalServices: [NUS_SERVICE],
+    });
+    return new BlePort(device);
+  }
+
+  async connectBluetooth() {
+    if (!('bluetooth' in navigator)) throw new Error('This browser has no Bluetooth. Use Chrome.');
+    return this.connect(await Turntable.pickBluetooth());
+  }
+
   async autoConnect() {
     if (!Turntable.supported) return false;
     let ports = [];
@@ -216,7 +269,8 @@ class Turntable {
     }
     if (this.connected) return;
     if (!port) {
-      if ('serial' in navigator) port = await navigator.serial.requestPort();
+      if (!('serial' in navigator) && !('usb' in navigator)) port = await Turntable.pickBluetooth();
+      else if ('serial' in navigator) port = await navigator.serial.requestPort();
       else port = new UsbSerialPort(await navigator.usb.requestDevice({ filters: [] }));
     }
     try {
@@ -369,6 +423,7 @@ function renderTurntable() {
   s.classList.toggle('ok', on);
   $('#tt-connect').textContent = on ? 'Disconnect' : 'Connect turntable';
   $('#tt-connect').disabled = !Turntable.supported || state.running;
+  $('#tt-ble').disabled = on || state.running;
   $('#cal-save').disabled = !on || turntable.moving;
   $('#cal-90').disabled = !on || turntable.moving;
   $('#cal-360').disabled = !on || turntable.moving;
@@ -384,9 +439,10 @@ function renderTurntable() {
 }
 turntable.onchange = renderTurntable;
 
-async function connectTurntable() {
+async function connectTurntable(bluetooth = false) {
   try {
-    await turntable.connect();
+    if (bluetooth) await turntable.connectBluetooth();
+    else await turntable.connect();
     toast('Turntable connected');
     return true;
   } catch (err) {
@@ -399,6 +455,11 @@ $('#tt-connect').addEventListener('click', () => {
   if (turntable.connected) turntable.disconnect();
   else connectTurntable();
 });
+
+if ('bluetooth' in navigator) {
+  $('#tt-ble').hidden = false;
+  $('#tt-ble').addEventListener('click', () => { if (!turntable.connected) connectTurntable(true); });
+}
 
 $('#cal-save').addEventListener('click', async () => {
   try {
@@ -534,7 +595,7 @@ async function runCapture() {
   if (state.running) return;
 
   // Pressing the button is what lets the browser show the serial-port picker.
-  if (!turntable.connected && Turntable.supported) await connectTurntable();
+  if (!turntable.connected && 'serial' in navigator) await connectTurntable();
   const useTurntable = turntable.connected;
   if (!useTurntable && !confirm('The turntable is not connected.\n\nTake the photos anyway, without spinning?')) return;
 
