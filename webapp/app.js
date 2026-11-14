@@ -103,6 +103,82 @@ function fmtDuration(sec) {
 /*   ?       status                    -> "ms=6000 v=100 t=0"          */
 /* Lines starting with "#" are log messages and are ignored.           */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* WebUSB serial: lets Chrome on Android phones talk to the ESP32.     */
+/* Phones have no Web Serial, so this looks like a serial port         */
+/* (open / readable / writable / close) but uses USB CDC directly.     */
+/* ------------------------------------------------------------------ */
+class UsbSerialPort {
+  constructor(device) {
+    this.device = device;
+    this.readable = null;
+    this.writable = null;
+    this.ctrlIf = null; this.dataIf = null; this.inEp = null; this.outEp = null;
+    this.closed = false;
+  }
+
+  async open({ baudRate = 115200 } = {}) {
+    const d = this.device;
+    await d.open();
+    if (!d.configuration) await d.selectConfiguration(1);
+    // Find the CDC data interface (class 0x0A) with a bulk IN and bulk OUT endpoint.
+    for (const iface of d.configuration.interfaces) {
+      const alt = iface.alternates.find(a => a.interfaceClass === 0x0a);
+      if (!alt) continue;
+      const inEp = alt.endpoints.find(e => e.direction === 'in' && e.type === 'bulk');
+      const outEp = alt.endpoints.find(e => e.direction === 'out' && e.type === 'bulk');
+      if (inEp && outEp) { this.dataIf = iface.interfaceNumber; this.inEp = inEp.endpointNumber; this.outEp = outEp.endpointNumber; }
+    }
+    const comm = d.configuration.interfaces.find(i => i.alternates.some(a => a.interfaceClass === 0x02));
+    this.ctrlIf = comm ? comm.interfaceNumber : null;
+    if (this.dataIf === null) {
+      await d.close().catch(() => {});
+      const e = new Error('This USB device is not a serial (CDC) device.'); e.name = 'NetworkError'; throw e;
+    }
+    try {
+      if (this.ctrlIf !== null) await d.claimInterface(this.ctrlIf);
+      await d.claimInterface(this.dataIf);
+    } catch (err) {
+      await d.close().catch(() => {});
+      const e = new Error(err.message); e.name = 'NetworkError'; throw e;
+    }
+    if (this.ctrlIf !== null) {
+      // Line coding (baud rate, 8N1) and DTR+RTS on, like a normal serial terminal.
+      const lc = new DataView(new ArrayBuffer(7));
+      lc.setUint32(0, baudRate, true); lc.setUint8(4, 0); lc.setUint8(5, 0); lc.setUint8(6, 8);
+      try {
+        await d.controlTransferOut({ requestType: 'class', recipient: 'interface', request: 0x20, value: 0, index: this.ctrlIf }, lc.buffer);
+        await d.controlTransferOut({ requestType: 'class', recipient: 'interface', request: 0x22, value: 0x03, index: this.ctrlIf });
+      } catch (_) { /* some boards don't need it */ }
+    }
+    this.closed = false;
+    this.readable = new ReadableStream({
+      pull: async (controller) => {
+        try {
+          const r = await d.transferIn(this.inEp, 512);
+          if (r.status === 'stall') await d.clearHalt('in', this.inEp);
+          else if (r.data && r.data.byteLength) controller.enqueue(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength));
+        } catch (err) {
+          if (this.closed) controller.close(); else controller.error(err);
+        }
+      },
+      cancel: () => { this.closed = true; },
+    });
+    this.writable = new WritableStream({
+      write: async (chunk) => { await d.transferOut(this.outEp, chunk); },
+    });
+  }
+
+  async close() {
+    this.closed = true;
+    const d = this.device;
+    try { if (this.ctrlIf !== null) await d.controlTransferOut({ requestType: 'class', recipient: 'interface', request: 0x22, value: 0, index: this.ctrlIf }); } catch (_) {}
+    try { await d.releaseInterface(this.dataIf); } catch (_) {}
+    try { if (this.ctrlIf !== null) await d.releaseInterface(this.ctrlIf); } catch (_) {}
+    try { await d.close(); } catch (_) {}
+  }
+}
+
 class Turntable {
   constructor() {
     this.port = null;
@@ -117,12 +193,17 @@ class Turntable {
 
   get connected() { return !!(this.port && this.writer); }
 
-  static get supported() { return 'serial' in navigator; }
+  // Web Serial on computers; WebUSB on Android phones (which have no Web Serial).
+  static get supported() { return 'serial' in navigator || 'usb' in navigator; }
 
   // Reconnect to a port the user already allowed, without showing the picker.
   async autoConnect() {
     if (!Turntable.supported) return false;
-    const ports = await navigator.serial.getPorts();
+    let ports = [];
+    try {
+      if ('serial' in navigator) ports = await navigator.serial.getPorts();
+      else ports = (await navigator.usb.getDevices()).map(d => new UsbSerialPort(d));
+    } catch (_) {}
     for (const port of ports) {
       try { await this.connect(port); return true; } catch (_) { await this._cleanup(); }
     }
@@ -131,15 +212,18 @@ class Turntable {
 
   async connect(port) {
     if (!Turntable.supported) {
-      throw new Error('This browser cannot use USB serial. Use Chrome or Edge on a computer.');
+      throw new Error('This browser cannot use USB. Use Chrome on a computer or an Android phone.');
     }
     if (this.connected) return;
-    port = port || await navigator.serial.requestPort();
+    if (!port) {
+      if ('serial' in navigator) port = await navigator.serial.requestPort();
+      else port = new UsbSerialPort(await navigator.usb.requestDevice({ filters: [{ classCode: 0x02 }, { classCode: 0xef }, { vendorId: 0x303a }, { classCode: 0xff }] }));
+    }
     try {
       await port.open({ baudRate: 115200 });
     } catch (err) {
       if (['NetworkError', 'InvalidStateError', 'NotReadableError'].includes(err.name)) {
-        throw new Error('Could not open the serial port. Close Arduino Serial Monitor/Plotter, other serial tools, and other PyInsect tabs, then reconnect.');
+        throw new Error('Could not open the serial port. Close Arduino Serial Monitor/Plotter, other serial tools, and other PyInsect tabs, then reconnect. On a phone, use a USB OTG cable.');
       }
       throw err;
     }
@@ -330,7 +414,8 @@ $('#cal-360').addEventListener('click', () => turntable.rotate(360).catch(err =>
 $('#cal-stop').addEventListener('click', () => turntable.stop());
 
 if (Turntable.supported) {
-  navigator.serial.addEventListener('connect', () => { if (!turntable.connected) turntable.autoConnect(); });
+  const usbApi = 'serial' in navigator ? navigator.serial : navigator.usb;
+  usbApi.addEventListener('connect', () => { if (!turntable.connected) turntable.autoConnect(); });
 }
 
 /* ------------------------------------------------------------------ */
