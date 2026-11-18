@@ -11,7 +11,7 @@ firmware/turntable/turntable.ino  Arduino alternative for the ESP32-C3
 ## User flow
 
 1. **Capture**: press *Capture Dataset*. The app connects to the turntable over USB serial and opens the camera. It then takes a photo every **8 s** (change this with the slider) until it has **at least 500**. The lighting changes automatically at every turntable stop:
-   - Camera with a flashlight (phone): room light, flashlight, darker exposure, brighter exposure
+   - Camera with a flashlight (phone): the exposure steps through normal, dim, dark, bright and very bright, while the flashlight strobes on and off (0.4 s each, `STROBE_MS` in `app.js`) the whole time, so every angle gets photos with and without the flashlight. Flashlight photos end in `_flash` (e.g. `dim_flash`)
    - No flashlight (laptop webcam): the screen glows white, warm and cool, plus room light
    
    The turntable makes several full spins of 24 stops each. Each spin is shifted slightly, so every photo is at a new angle.
