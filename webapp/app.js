@@ -1,7 +1,7 @@
 'use strict';
 
 /* PyInsect Data Collector
- * Step 1: capture — a burst of PHOTO_TARGET photos in CAPTURE seconds (default 500 in 8 s) while the
+ * Step 1: capture — a burst of photoTarget photos in CAPTURE seconds (default 500 in 8 s) while the
  *         turntable (ESP32-C3 over USB serial) spins continuously and the lighting changes automatically
  * Step 2: review  — gallery of every photo taken
  * Step 3: name    — name the folder and save it as a .zip
@@ -9,8 +9,10 @@
 
 const $ = (sel) => document.querySelector(sel);
 
-const PHOTO_TARGET = 500;     // photos per dataset
+const DEFAULT_PHOTOS = 500;   // photos per dataset (the Photos slider changes it, 50-1000)
 const DEFAULT_INTERVAL = 8;   // seconds the whole burst takes
+const MAX_ZOOM = 4;           // highest zoom on the slider (more when the camera has real zoom, up to 8)
+const MAX_ENCODING = 24;      // photos allowed to wait for JPEG encoding at once (limits phone memory)
 const WARMUP_MS = 1500;       // let the camera focus/expose before the burst starts
 
 // Lighting changes automatically through many levels during the burst.
@@ -25,7 +27,7 @@ const CAMERA_LIGHTS = [
 ];
 // The flashlight strobes on, off, on, off... through the whole burst, on top of the levels above,
 // so every angle and every level gets photos both with and without the flashlight.
-const STROBE_MS = 400;        // flashlight stays on this long, then off this long
+const DEFAULT_STROBE_MS = 200; // flashlight stays on this long, then off this long (Strobe slider: 100-1000)
 // No flashlight (laptop webcam / front camera): the screen glows in different colours and levels.
 const SCREEN_LIGHTS = [
   { id: 'white',  label: 'Screen white',  screen: '#ffffff' },
@@ -35,7 +37,20 @@ const SCREEN_LIGHTS = [
   { id: 'dark',   label: 'Screen dark',   screen: '#242424' },
   { id: 'room',   label: 'Room light',    screen: '#000000' },
 ];
-const LIGHT_SETTLE_MS = 150;  // camera needs a moment before a new light shows up in frames
+// After a light change, the camera needs a few frames before the new light shows up in them.
+// Photos taken in that gap are labelled "changing" rather than guessed. Counted in real camera
+// frames (so it's right at 30 and 60 fps); the ms values are the fallback without frame timing.
+const LEVEL_SETTLE_FRAMES = 5, LIGHT_SETTLE_MS = 150;  // new exposure level (or screen colour)
+const TORCH_SETTLE_FRAMES = 2, TORCH_SETTLE_MS = 70;   // flashlight on/off only
+const MIN_PHOTOS_PER_PHASE = 3;   // each flashlight on or off phase holds at least this many photos
+
+// The flashlight on/off time actually used. It is the Strobe setting, but adjusted when needed so
+// every flashlight phase holds a few photos (otherwise photos can line up with the strobe and all
+// get the same flash state) and every exposure level gets both flash and no-flash photos.
+function strobePhaseMs() {
+  const gap = interval * 1000 / photoTarget, levelMs = interval * 1000 / CAMERA_LIGHTS.length;
+  return Math.round(Math.min(Math.max(strobeMs, MIN_PHOTOS_PER_PHASE * gap), (levelMs - LIGHT_SETTLE_MS) / 2));
+}
 
 const state = {
   photos: [],          // { blob, url, angle, light, lightLabel, time, removed }
@@ -50,9 +65,18 @@ const state = {
 };
 
 let interval = DEFAULT_INTERVAL;
+let photoTarget = DEFAULT_PHOTOS;
+let strobeMs = DEFAULT_STROBE_MS;
+let zoom = 1;
 try {
+  const st = +localStorage.getItem('pyinsect-strobe-ms');
+  if (st >= 100 && st <= 1000) strobeMs = st;
   const saved = +localStorage.getItem('pyinsect-capture-seconds');
   if (saved >= 4 && saved <= 30) interval = saved;
+  const count = +localStorage.getItem('pyinsect-photo-count');
+  if (count >= 50 && count <= 1000) photoTarget = count;
+  const z = +localStorage.getItem('pyinsect-zoom');
+  if (z >= 1 && z <= 8) zoom = z;
 } catch (_) {}
 
 /* ------------------------------------------------------------------ */
@@ -84,6 +108,8 @@ async function wait(ms, onTick) {
     await sleep(Math.min(100, left));
   }
 }
+
+const fmtStrobe = (ms) => `${+(ms / 1000).toFixed(2)} s`;   // 200 -> "0.2 s", 150 -> "0.15 s"
 
 function fmtDuration(sec) {
   sec = Math.round(sec);
@@ -428,9 +454,24 @@ if (Turntable.supported) {
 /* Intro screen                                                        */
 /* ------------------------------------------------------------------ */
 function updateEstimate() {
-  const fps = PHOTO_TARGET / interval;
-  $('#estimate').textContent = `${PHOTO_TARGET} photos in ${interval} s · ${fps.toFixed(fps < 100 ? 1 : 0)} photos per second`;
+  const fps = photoTarget / interval;
+  let text = `${photoTarget} photos in ${interval} s · ${fps.toFixed(fps < 100 ? 1 : 0)} photos per second`;
+  // The camera is asked for 60 frames per second; warn only when well above that (not on the default 62.5).
+  if (fps > 75) text += '. Some photos will be the same, because that is faster than the camera. Use fewer photos or more time.';
+  const phase = strobePhaseMs();
+  text += ` · flashlight on/off every ${fmtStrobe(phase)}`;
+  if (phase !== strobeMs) text += ` (not ${fmtStrobe(strobeMs)}, so every light level gets photos with and without it)`;
+  $('#estimate').textContent = text;
 }
+
+$('#count').value = photoTarget;
+$('#count-out').textContent = String(photoTarget);
+$('#count').addEventListener('input', (e) => {
+  photoTarget = +e.target.value;
+  $('#count-out').textContent = String(photoTarget);
+  try { localStorage.setItem('pyinsect-photo-count', String(photoTarget)); } catch (_) {}
+  updateEstimate();
+});
 
 $('#interval').value = interval;
 $('#interval-out').textContent = `${interval} s`;
@@ -438,6 +479,15 @@ $('#interval').addEventListener('input', (e) => {
   interval = +e.target.value;
   $('#interval-out').textContent = `${interval} s`;
   try { localStorage.setItem('pyinsect-capture-seconds', String(interval)); } catch (_) {}
+  updateEstimate();
+});
+
+$('#strobe').value = strobeMs / 1000;
+$('#strobe-out').textContent = fmtStrobe(strobeMs);
+$('#strobe').addEventListener('input', (e) => {
+  strobeMs = Math.round(+e.target.value * 1000);
+  $('#strobe-out').textContent = fmtStrobe(strobeMs);
+  try { localStorage.setItem('pyinsect-strobe-ms', String(strobeMs)); } catch (_) {}
   updateEstimate();
 });
 
@@ -451,10 +501,12 @@ async function startCamera() {
   stopCamera();
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
-    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 }, frameRate: { ideal: 60 } },
+    // zoom: true asks Chrome to expose the camera's real zoom, when it has one.
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 }, frameRate: { ideal: 60 }, zoom: true },
   });
   state.stream = stream;
   state.track = stream.getVideoTracks()[0];
+  state.hwZoomBroken = false;
   const video = $('#video');
   video.srcObject = stream;
   await video.play();
@@ -476,10 +528,131 @@ function stopCamera() {
   $('#video').srcObject = null;
 }
 
+/* Zoom: real camera zoom when the camera has it (sharper), otherwise a digital zoom that keeps
+ * only the centre of each frame. Either way the saved photos show just the zoomed-in part.
+ * `zoom` is a multiple of the camera's widest view. Phones report their range as a ratio (1-8),
+ * desktop webcams often in raw units (e.g. 100-500), so the real value is relative to the minimum. */
+function hwRange() {
+  const z = state.caps.zoom;
+  if (state.hwZoomBroken || !z || !(z.min > 0) || z.max / z.min < 2) return null;   // less than 2× isn't worth it
+  return z;
+}
+function hwZoom() {
+  const z = hwRange();
+  if (!z) return null;
+  let v = Math.max(z.min, Math.min(z.max, z.min * zoom));
+  if (z.step > 0) v = Math.min(z.max, z.min + Math.round((v - z.min) / z.step) * z.step);
+  return v;
+}
+function maxZoom() { const z = hwRange(); return z ? Math.min(8, z.max / z.min) : MAX_ZOOM; }
+function digitalZoom() { return hwZoom() === null ? zoom : 1; }
+
+// Sizes the preview so it shows exactly what the photos keep: a box with the photo's shape, as big
+// as fits in the free space above the controls panel (beside it in landscape) so the bug in the
+// middle is never hidden under the panel. With digital zoom the video inside the box is drawn
+// `d` times bigger and centred, so the box shows just the centre part the photos crop to.
+function layoutPreview() {
+  const cam = $('#screen-camera'), box = $('#preview'), video = $('#video');
+  const r = $('.panel.run').getBoundingClientRect(), c = cam.getBoundingClientRect();
+  if (!c.width || !c.height) return;   // camera screen not showing
+  const side = r.width < c.width * 0.9;
+  const ph = side ? 0 : Math.max(0, c.bottom - r.top), pw = side ? Math.max(0, c.right - r.left) : 0;
+  cam.style.setProperty('--panel-h', `${ph}px`);
+  cam.style.setProperty('--panel-w', `${pw}px`);
+  const a = video.videoWidth > 16 && video.videoHeight > 16 ? video.videoWidth / video.videoHeight : 4 / 3;
+  let w, h;
+  if (cam.classList.contains('screenlight')) {   // small preview in the corner; CSS places it
+    w = c.width * 0.3; h = w / a;
+    box.style.left = box.style.top = '';
+  } else {
+    const W = c.width - pw, H = c.height - ph;
+    if (W / H > a) { h = H; w = H * a; } else { w = W; h = W / a; }
+    box.style.left = `${(W - w) / 2}px`;
+    box.style.top = `${(H - h) / 2}px`;
+  }
+  box.style.width = `${w}px`;
+  box.style.height = `${h}px`;
+  const d = digitalZoom();
+  video.style.width = `${w * d}px`;
+  video.style.height = `${h * d}px`;
+  video.style.left = `${(w - w * d) / 2}px`;
+  video.style.top = `${(h - h * d) / 2}px`;
+}
+if (window.ResizeObserver) new ResizeObserver(layoutPreview).observe($('.panel.run'));
+window.addEventListener('resize', layoutPreview);
+$('#video').addEventListener('resize', layoutPreview);   // the camera's picture size became known or changed
+
+// The part of the camera frame the photos keep: { sx, sy, sw, sh } in video pixels.
+function cropRect(video) {
+  const d = digitalZoom();
+  const sw = Math.round(video.videoWidth / d), sh = Math.round(video.videoHeight / d);
+  return { sx: Math.round((video.videoWidth - sw) / 2), sy: Math.round((video.videoHeight - sh) / 2), sw, sh };
+}
+
+let zoomSeq = 0;
+async function setZoom(z) {
+  zoom = z;
+  const seq = ++zoomSeq;
+  $('#zoom-out').textContent = `${z.toFixed(1)}×`;
+  try { localStorage.setItem('pyinsect-zoom', String(z)); } catch (_) {}
+  layoutPreview();   // digital zoom: the preview shows the same centre part the photos keep
+  const want = hwZoom();
+  if (want === null || !state.track) return;
+  try { await state.track.applyConstraints({ advanced: [{ zoom: want }] }); } catch (_) { /* best effort */ }
+  if (seq !== zoomSeq || !state.track) return;   // the slider has moved on; only the latest request is checked
+  // Some cameras list a zoom range but ignore it. Then use digital zoom for the rest of this session.
+  const got = state.track.getSettings ? state.track.getSettings().zoom : undefined;
+  const min = state.caps.zoom.min;
+  if (want > min * 1.2 && typeof got === 'number' && Math.abs(got - min) < (want - min) * 0.1) {
+    state.hwZoomBroken = true;
+    $('#zoom').max = maxZoom();
+    const z2 = Math.min(zoom, maxZoom());
+    $('#zoom').value = z2;
+    setZoom(z2);
+  }
+}
+
+// Shows the zoom slider over the live camera and waits for Start (or Cancel).
+function frameBug() {
+  const cam = $('#screen-camera'), slider = $('#zoom');
+  slider.max = maxZoom();
+  zoom = Math.max(1, Math.min(zoom, +slider.max));
+  slider.value = zoom;
+  setZoom(zoom);
+  slider.oninput = () => setZoom(+slider.value);
+  $('#frame-controls').hidden = false;
+  $('#frame-guide').hidden = cam.classList.contains('screenlight');
+  cam.classList.add('framing');
+  $('#stop').textContent = 'Cancel';
+  hud('Zoom in on the bug', 'Put the bug in the ring, move the slider until it fills the picture, then press Start.');
+  layoutPreview();
+  return new Promise(resolve => {
+    const done = () => {
+      clearInterval(watch);
+      $('#frame-controls').hidden = true;
+      $('#frame-guide').hidden = true;
+      cam.classList.remove('framing');
+      if (!state.abort) $('#stop').textContent = 'Stop';
+      layoutPreview();
+      resolve();
+    };
+    const watch = setInterval(() => { if (state.abort) done(); }, 100);
+    $('#start-burst').onclick = done;
+  });
+}
+
+// Gives the browser a turn without waiting a whole timer tick (setTimeout(0) can take 4 ms or more).
+function yieldNow() {
+  return new Promise(resolve => { const c = new MessageChannel(); c.port1.onmessage = () => resolve(); c.port2.postMessage(0); });
+}
+
 function autoLights() {
   // Phones often report the flashlight only after frames start flowing — caps are re-read in startCamera.
   return state.caps.torch || state.caps.exposureCompensation || !state.facingUser ? CAMERA_LIGHTS : SCREEN_LIGHTS;
 }
+
+// Photos taken while the light is switching: the frame may show the old or the new light.
+const CHANGING = { id: 'changing', label: 'Light changing' };
 
 // The id and label saved with a photo, e.g. "dim_flash" / "Dim + flashlight".
 function shotLight(light, torch) {
@@ -492,6 +665,7 @@ async function applyLight(light, torch = false) {
   if (!state.track || (light && light.screen)) return;
   const adv = {};
   if (state.caps.torch) adv.torch = !!torch;
+  if (hwZoom() !== null) adv.zoom = hwZoom();   // sent every time so a light change can't undo the zoom
   if (state.caps.exposureCompensation) {
     const { min, max } = state.caps.exposureCompensation;
     adv.exposureCompensation = Math.max(min, Math.min(max, (light && light.ev) || 0));
@@ -523,6 +697,7 @@ function grabFrame() {
 
 async function keepScreenOn(on) {
   try {
+    if (on && state.wakeLock && !state.wakeLock.released) return;   // already held
     if (on && 'wakeLock' in navigator) state.wakeLock = await navigator.wakeLock.request('screen');
     else if (!on && state.wakeLock) { await state.wakeLock.release(); state.wakeLock = null; }
   } catch (_) {}
@@ -545,7 +720,7 @@ async function runCapture() {
 
   // Pressing the button is what lets the browser show the serial-port picker.
   if (!turntable.connected && Turntable.supported) await connectTurntable();
-  const useTurntable = turntable.connected;
+  let useTurntable = turntable.connected;
   if (!useTurntable && !confirm('The turntable is not connected.\n\nTake the photos anyway, without spinning?')) return;
 
   try { if (!document.fullscreenElement) await document.documentElement.requestFullscreen(); } catch (_) {}
@@ -555,10 +730,12 @@ async function runCapture() {
   renderTurntable();
   $('#last-shot').hidden = true;
   $('#stop').textContent = 'Stop';
-  $('#screen-camera').classList.remove('screenlight');
+  $('#screen-camera').classList.remove('screenlight', 'framing');
+  $('#frame-controls').hidden = true;
+  $('#frame-guide').hidden = true;
   show('camera');
   hud('Starting camera…');
-  hudProgress(0, PHOTO_TARGET);
+  hudProgress(0, photoTarget);
   await keepScreenOn(true);
 
   let spun = 0;          // degrees the turntable turned during the burst
@@ -569,73 +746,129 @@ async function runCapture() {
     await startCamera();
     const lights = autoLights();
     $('#screen-camera').classList.toggle('screenlight', !!lights[0].screen);
+    layoutPreview();
     await applyLight(lights[0]);
-    await wait(WARMUP_MS, () => hud('Get ready…', `${PHOTO_TARGET} photos in ${interval} seconds`));
+    await frameBug();
+    if (state.abort) throw new Error('stopped');
+    // Framing can take a while: the screen may have locked (dropping the wake lock) or the
+    // turntable cable may have come loose, so check both again before the burst.
+    await keepScreenOn(true);
+    if (useTurntable && !turntable.connected) {
+      await turntable.autoConnect();
+      if (!turntable.connected) {
+        if (!confirm('The turntable got disconnected.\n\nTake the photos anyway, without spinning?')) { state.abort = true; throw new Error('stopped'); }
+        useTurntable = false;
+      }
+    }
+    await wait(WARMUP_MS, () => hud('Get ready…', `${photoTarget} photos in ${interval} seconds`));
     if (state.abort) throw new Error('stopped');
 
     const video = $('#video');
+    // The camera can briefly report a tiny placeholder size (2×2) before real frames arrive.
+    // Wait for the real size, or every photo would be a few pixels.
+    for (let t = 0; video.videoWidth <= 16 && t < 60 && !state.abort; t++) await sleep(50);
+    if (state.abort) throw new Error('stopped');
+    if (video.videoWidth <= 16) throw new Error('The camera did not start properly. Please try again.');
     const durationMs = interval * 1000;
-    const gapMs = durationMs / PHOTO_TARGET;        // 16 ms for 500 photos in 8 s
+    const gapMs = durationMs / photoTarget;        // 16 ms for 500 photos in 8 s
     const lightMs = durationMs / lights.length;     // each lighting gets an equal slice of the burst
     const strobe = !!state.caps.torch && !lights[0].screen;
-    let active = { light: lights[0], torch: false }; // what the camera is really showing right now
+    const phaseMs = strobePhaseMs();
+    let shown = { light: lights[0], torch: false };  // the light the frames really show (photo labels)
+    let pending = null;   // a light change the frames may not show yet: { want, readyFrame, readyAt }
+    const hasFrameTiming = !!video.requestVideoFrameCallback;
+    // Turns a pending change into the photo label once enough camera frames have arrived.
+    const settle = () => {
+      if (pending && (hasFrameTiming ? frames >= pending.readyFrame : performance.now() >= pending.readyAt)) {
+        shown = pending.want;
+        pending = null;
+      }
+    };
 
     // Count how many different frames the camera really delivers.
     let frames = 0, counting = true;
-    if (video.requestVideoFrameCallback) {
+    if (hasFrameTiming) {
       const onFrame = () => { if (counting) { frames++; video.requestVideoFrameCallback(onFrame); } };
       video.requestVideoFrameCallback(onFrame);
     }
 
+    // Photos keep only the zoomed-in part of the frame (all of it with real camera zoom).
+    const crop = cropRect(video);
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = crop.sw;
+    canvas.height = crop.sh;
     const ctx = canvas.getContext('2d');
     const encoding = [];
 
     if (useTurntable) spin = turntable.spinFor(durationMs);
     const t0 = performance.now();
 
-    // Runs beside the photo loop so the burst stays on time. One change at a time: the camera is told
-    // the new level and flashlight state, given LIGHT_SETTLE_MS to show it, and only then are photos
-    // labelled with it.
+    // Runs beside the photo loop so the burst stays on time: one camera change at a time, on
+    // schedule, never waiting for a change to show up before making the next one. The strobe starts
+    // over at each exposure level so every level gets both flash and no-flash photos.
+    // From the moment a change is asked for until enough frames have arrived to show it, photos are
+    // labelled "changing" — never with a light the frames might not show. An exposure change keeps
+    // its longer wait even if the flashlight switches again meanwhile.
+    const torchSwitches = [];   // when the flashlight really switched, to report the real strobe speed
     lighting = (async () => {
-      let cur = active;
+      let cur = shown;   // what the camera was last told
+      let levelReadyFrame = 0, levelReadyAt = 0;
       while (!lightingDone && !state.abort) {
         const elapsed = performance.now() - t0;
+        const level = Math.min(lights.length - 1, Math.floor(elapsed / lightMs));
         const want = {
-          light: lights[Math.min(lights.length - 1, Math.floor(elapsed / lightMs))],
-          torch: strobe && Math.floor(elapsed / STROBE_MS) % 2 === 0,
+          light: lights[level],
+          torch: strobe && Math.floor((elapsed - level * lightMs) / phaseMs) % 2 === 0,
         };
-        if (want.light === cur.light && want.torch === cur.torch) { await sleep(5); continue; }
+        if (want.light === cur.light && want.torch === cur.torch) { await sleep(2); continue; }
+        const levelChange = want.light !== cur.light, torchChange = want.torch !== cur.torch;
+        // A level change only needs time to show when the camera or screen does it; the software
+        // brightness (cameras without exposure control) is applied to each photo directly.
+        const visible = torchChange || (levelChange && (!!state.caps.exposureCompensation || !!want.light.screen));
+        if (visible) pending = { want, readyFrame: Infinity, readyAt: Infinity };
         await applyLight(want.light, want.torch);
-        await sleep(LIGHT_SETTLE_MS);
-        cur = active = want;
+        cur = want;
+        const now = performance.now();
+        if (torchChange) torchSwitches.push(now);
+        if (!visible) { if (!pending) shown = want; continue; }
+        if (levelChange) { levelReadyFrame = frames + LEVEL_SETTLE_FRAMES; levelReadyAt = now + LIGHT_SETTLE_MS; }
+        pending = { want, readyFrame: Math.max(levelReadyFrame, frames + TORCH_SETTLE_FRAMES), readyAt: Math.max(levelReadyAt, now + TORCH_SETTLE_MS) };
       }
     })();
 
-    for (let i = 0; i < PHOTO_TARGET && !state.abort; i++) {
+    let encodingNow = 0;   // photos still being turned into JPEGs
+    for (let i = 0; i < photoTarget && !state.abort; i++) {
       const due = t0 + i * gapMs;
       const early = due - performance.now();
-      if (early > 1) await sleep(early);
+      // Always give the browser a turn, even when behind schedule, so the flashlight strobe,
+      // the on-screen counter and the JPEG encoding keep running.
+      await (early > 1 ? sleep(early) : yieldNow());
+      // Too many photos waiting to be encoded uses a lot of phone memory: let them catch up.
+      while (encodingNow >= MAX_ENCODING && !state.abort) await sleep(2);
+      // The turntable spins for exactly the burst time. If the phone can't keep up, stop on time
+      // with fewer photos rather than take photos after the spin with wrong angles.
+      if (performance.now() - t0 > durationMs) break;
 
       const elapsed = performance.now() - t0;
-      const { light, torch } = active;
-      const shot = shotLight(light, torch);
+      settle();
+      const { light, torch } = shown;
+      const shot = pending ? CHANGING : shotLight(light, torch);
 
-      ctx.drawImage(video, 0, 0);
+      ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh);
       applySoft(ctx, canvas.width, canvas.height, softLevel(light));
       const angle = useTurntable ? Math.round(((elapsed / turntable.info.ms) * 360 % 360) * 10) / 10 : 0;
       const photo = { blob: null, url: '', angle, light: shot.id, lightLabel: shot.label, time: new Date(), removed: false };
       state.photos.push(photo);
       // toBlob copies the canvas now and encodes in the background, so the next photo isn't delayed.
+      encodingNow++;
       encoding.push(new Promise(res => canvas.toBlob(b => {
+        encodingNow--;
         if (b) { photo.blob = b; photo.url = URL.createObjectURL(b); }
         res();
       }, 'image/jpeg', 0.85)));
 
       if (i % 8 === 0) {
-        hudProgress(i + 1, PHOTO_TARGET);
+        hudProgress(i + 1, photoTarget);
         hud(`${Math.max(0, (durationMs - elapsed) / 1000).toFixed(1)} s`, `${shot.label} · ${i + 1} photos`);
       }
       if (i % 25 === 0) {
@@ -645,7 +878,7 @@ async function runCapture() {
     }
     const burstMs = performance.now() - t0;
     counting = false;
-    hudProgress(state.photos.length, PHOTO_TARGET);
+    hudProgress(state.photos.length, photoTarget);
     hud('Saving photos…', `${state.photos.length} photos in ${(burstMs / 1000).toFixed(1)} s`);
     lightingDone = true;
     await lighting;
@@ -655,6 +888,11 @@ async function runCapture() {
     state.photos = state.photos.filter(p => p.blob);
     state.cameraFrames = video.requestVideoFrameCallback ? frames : null;
     state.burstMs = burstMs;
+    // The real strobe speed: a slow phone may not manage the chosen one.
+    const gaps = torchSwitches.slice(1).map((t, k) => t - torchSwitches[k]);
+    state.strobe = strobe && gaps.length >= 2
+      ? { planned: phaseMs, measured: gaps.reduce((a, b) => a + b, 0) / gaps.length }
+      : null;
 
     if (spin) {
       hud('Saving photos…', 'Turntable finishing its spin');
@@ -739,6 +977,14 @@ function updateGalleryCount() {
     const fps = Math.round(state.cameraFrames / (state.burstMs / 1000));
     text += `. Your camera ran at about ${fps} frames per second, so about ${state.cameraFrames} of them are different and the rest are repeats`;
   }
+  if (state.strobe) {
+    // Level changes fall between strobe switches, so the measured average reads a bit shorter; allow for it.
+    const slow = state.strobe.measured > state.strobe.planned * 1.3;
+    text += ` · flashlight on/off about every ${fmtStrobe(Math.round(state.strobe.measured / 10) * 10)}`;
+    if (slow) text += ` (slower than ${fmtStrobe(state.strobe.planned)}: this phone can't switch it faster)`;
+  }
+  const changing = state.photos.filter(p => p.light === CHANGING.id).length;
+  if (changing) text += ` · ${changing} taken while the light was switching are labelled "${CHANGING.id}"`;
   text += removed ? ` · ${removed} will be removed` : ' · tap a photo to remove it';
   $('#gallery-count').textContent = text;
   $('#gallery-next').disabled = keptPhotos().length === 0;
@@ -750,6 +996,7 @@ function clearPhotos() {
   state.zipBlob = null;
   state.burstMs = 0;
   state.cameraFrames = null;
+  state.strobe = null;
 }
 
 $('#gallery-restart').addEventListener('click', () => {
@@ -768,8 +1015,9 @@ function cleanName(raw) {
   return raw.trim().replace(/\s+/g, '_').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
 }
 
-function fileNameFor(folder, p, i) {
-  const n = String(i + 1).padStart(3, '0');
+// width = digits in the photo number, so 1000 photos are numbered 0001...1000 and still sort in order.
+function fileNameFor(folder, p, i, width = Math.max(3, String(keptPhotos().length).length)) {
+  const n = String(i + 1).padStart(width, '0');
   const deg = p.angle.toFixed(1).replace('.', 'p').padStart(5, '0');
   return `${folder}_${n}_${deg}deg_${p.light}.jpg`;
 }
@@ -795,8 +1043,10 @@ async function buildZip() {
   const zip = new JSZip();
   const dir = zip.folder(folder);
   const rows = [['file', 'insect', 'angle_deg', 'lighting', 'captured_at']];
-  keptPhotos().forEach((p, i) => {
-    const name = fileNameFor(folder, p, i);
+  const kept = keptPhotos();
+  const width = Math.max(3, String(kept.length).length);
+  kept.forEach((p, i) => {
+    const name = fileNameFor(folder, p, i, width);
     dir.file(name, p.blob);
     rows.push([name, folder, p.angle, p.light, p.time.toISOString()]);
   });
