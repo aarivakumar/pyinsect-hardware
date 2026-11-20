@@ -27,7 +27,7 @@ const CAMERA_LIGHTS = [
 ];
 // The flashlight strobes on, off, on, off... through the whole burst, on top of the levels above,
 // so every angle and every level gets photos both with and without the flashlight.
-const STROBE_MS = 400;        // flashlight stays on this long, then off this long
+const DEFAULT_STROBE_MS = 200; // flashlight stays on this long, then off this long (Strobe slider: 100-1000)
 // No flashlight (laptop webcam / front camera): the screen glows in different colours and levels.
 const SCREEN_LIGHTS = [
   { id: 'white',  label: 'Screen white',  screen: '#ffffff' },
@@ -37,7 +37,20 @@ const SCREEN_LIGHTS = [
   { id: 'dark',   label: 'Screen dark',   screen: '#242424' },
   { id: 'room',   label: 'Room light',    screen: '#000000' },
 ];
-const LIGHT_SETTLE_MS = 150;  // camera needs a moment before a new light shows up in frames
+// After a light change, the camera needs a few frames before the new light shows up in them.
+// Photos taken in that gap are labelled "changing" rather than guessed. Counted in real camera
+// frames (so it's right at 30 and 60 fps); the ms values are the fallback without frame timing.
+const LEVEL_SETTLE_FRAMES = 5, LIGHT_SETTLE_MS = 150;  // new exposure level (or screen colour)
+const TORCH_SETTLE_FRAMES = 2, TORCH_SETTLE_MS = 70;   // flashlight on/off only
+const MIN_PHOTOS_PER_PHASE = 3;   // each flashlight on or off phase holds at least this many photos
+
+// The flashlight on/off time actually used. It is the Strobe setting, but adjusted when needed so
+// every flashlight phase holds a few photos (otherwise photos can line up with the strobe and all
+// get the same flash state) and every exposure level gets both flash and no-flash photos.
+function strobePhaseMs() {
+  const gap = interval * 1000 / photoTarget, levelMs = interval * 1000 / CAMERA_LIGHTS.length;
+  return Math.round(Math.min(Math.max(strobeMs, MIN_PHOTOS_PER_PHASE * gap), (levelMs - LIGHT_SETTLE_MS) / 2));
+}
 
 const state = {
   photos: [],          // { blob, url, angle, light, lightLabel, time, removed }
@@ -53,8 +66,11 @@ const state = {
 
 let interval = DEFAULT_INTERVAL;
 let photoTarget = DEFAULT_PHOTOS;
+let strobeMs = DEFAULT_STROBE_MS;
 let zoom = 1;
 try {
+  const st = +localStorage.getItem('pyinsect-strobe-ms');
+  if (st >= 100 && st <= 1000) strobeMs = st;
   const saved = +localStorage.getItem('pyinsect-capture-seconds');
   if (saved >= 4 && saved <= 30) interval = saved;
   const count = +localStorage.getItem('pyinsect-photo-count');
@@ -92,6 +108,8 @@ async function wait(ms, onTick) {
     await sleep(Math.min(100, left));
   }
 }
+
+const fmtStrobe = (ms) => `${+(ms / 1000).toFixed(2)} s`;   // 200 -> "0.2 s", 150 -> "0.15 s"
 
 function fmtDuration(sec) {
   sec = Math.round(sec);
@@ -440,6 +458,9 @@ function updateEstimate() {
   let text = `${photoTarget} photos in ${interval} s · ${fps.toFixed(fps < 100 ? 1 : 0)} photos per second`;
   // The camera is asked for 60 frames per second; warn only when well above that (not on the default 62.5).
   if (fps > 75) text += '. Some photos will be the same, because that is faster than the camera. Use fewer photos or more time.';
+  const phase = strobePhaseMs();
+  text += ` · flashlight on/off every ${fmtStrobe(phase)}`;
+  if (phase !== strobeMs) text += ` (not ${fmtStrobe(strobeMs)}, so every light level gets photos with and without it)`;
   $('#estimate').textContent = text;
 }
 
@@ -458,6 +479,15 @@ $('#interval').addEventListener('input', (e) => {
   interval = +e.target.value;
   $('#interval-out').textContent = `${interval} s`;
   try { localStorage.setItem('pyinsect-capture-seconds', String(interval)); } catch (_) {}
+  updateEstimate();
+});
+
+$('#strobe').value = strobeMs / 1000;
+$('#strobe-out').textContent = fmtStrobe(strobeMs);
+$('#strobe').addEventListener('input', (e) => {
+  strobeMs = Math.round(+e.target.value * 1000);
+  $('#strobe-out').textContent = fmtStrobe(strobeMs);
+  try { localStorage.setItem('pyinsect-strobe-ms', String(strobeMs)); } catch (_) {}
   updateEstimate();
 });
 
@@ -621,6 +651,9 @@ function autoLights() {
   return state.caps.torch || state.caps.exposureCompensation || !state.facingUser ? CAMERA_LIGHTS : SCREEN_LIGHTS;
 }
 
+// Photos taken while the light is switching: the frame may show the old or the new light.
+const CHANGING = { id: 'changing', label: 'Light changing' };
+
 // The id and label saved with a photo, e.g. "dim_flash" / "Dim + flashlight".
 function shotLight(light, torch) {
   return torch ? { id: `${light.id}_flash`, label: `${light.label} + flashlight` } : { id: light.id, label: light.label };
@@ -740,11 +773,21 @@ async function runCapture() {
     const gapMs = durationMs / photoTarget;        // 16 ms for 500 photos in 8 s
     const lightMs = durationMs / lights.length;     // each lighting gets an equal slice of the burst
     const strobe = !!state.caps.torch && !lights[0].screen;
-    let active = { light: lights[0], torch: false }; // what the camera is really showing right now
+    const phaseMs = strobePhaseMs();
+    let shown = { light: lights[0], torch: false };  // the light the frames really show (photo labels)
+    let pending = null;   // a light change the frames may not show yet: { want, readyFrame, readyAt }
+    const hasFrameTiming = !!video.requestVideoFrameCallback;
+    // Turns a pending change into the photo label once enough camera frames have arrived.
+    const settle = () => {
+      if (pending && (hasFrameTiming ? frames >= pending.readyFrame : performance.now() >= pending.readyAt)) {
+        shown = pending.want;
+        pending = null;
+      }
+    };
 
     // Count how many different frames the camera really delivers.
     let frames = 0, counting = true;
-    if (video.requestVideoFrameCallback) {
+    if (hasFrameTiming) {
       const onFrame = () => { if (counting) { frames++; video.requestVideoFrameCallback(onFrame); } };
       video.requestVideoFrameCallback(onFrame);
     }
@@ -760,21 +803,36 @@ async function runCapture() {
     if (useTurntable) spin = turntable.spinFor(durationMs);
     const t0 = performance.now();
 
-    // Runs beside the photo loop so the burst stays on time. One change at a time: the camera is told
-    // the new level and flashlight state, given LIGHT_SETTLE_MS to show it, and only then are photos
-    // labelled with it.
+    // Runs beside the photo loop so the burst stays on time: one camera change at a time, on
+    // schedule, never waiting for a change to show up before making the next one. The strobe starts
+    // over at each exposure level so every level gets both flash and no-flash photos.
+    // From the moment a change is asked for until enough frames have arrived to show it, photos are
+    // labelled "changing" — never with a light the frames might not show. An exposure change keeps
+    // its longer wait even if the flashlight switches again meanwhile.
+    const torchSwitches = [];   // when the flashlight really switched, to report the real strobe speed
     lighting = (async () => {
-      let cur = active;
+      let cur = shown;   // what the camera was last told
+      let levelReadyFrame = 0, levelReadyAt = 0;
       while (!lightingDone && !state.abort) {
         const elapsed = performance.now() - t0;
+        const level = Math.min(lights.length - 1, Math.floor(elapsed / lightMs));
         const want = {
-          light: lights[Math.min(lights.length - 1, Math.floor(elapsed / lightMs))],
-          torch: strobe && Math.floor(elapsed / STROBE_MS) % 2 === 0,
+          light: lights[level],
+          torch: strobe && Math.floor((elapsed - level * lightMs) / phaseMs) % 2 === 0,
         };
-        if (want.light === cur.light && want.torch === cur.torch) { await sleep(5); continue; }
+        if (want.light === cur.light && want.torch === cur.torch) { await sleep(2); continue; }
+        const levelChange = want.light !== cur.light, torchChange = want.torch !== cur.torch;
+        // A level change only needs time to show when the camera or screen does it; the software
+        // brightness (cameras without exposure control) is applied to each photo directly.
+        const visible = torchChange || (levelChange && (!!state.caps.exposureCompensation || !!want.light.screen));
+        if (visible) pending = { want, readyFrame: Infinity, readyAt: Infinity };
         await applyLight(want.light, want.torch);
-        await sleep(LIGHT_SETTLE_MS);
-        cur = active = want;
+        cur = want;
+        const now = performance.now();
+        if (torchChange) torchSwitches.push(now);
+        if (!visible) { if (!pending) shown = want; continue; }
+        if (levelChange) { levelReadyFrame = frames + LEVEL_SETTLE_FRAMES; levelReadyAt = now + LIGHT_SETTLE_MS; }
+        pending = { want, readyFrame: Math.max(levelReadyFrame, frames + TORCH_SETTLE_FRAMES), readyAt: Math.max(levelReadyAt, now + TORCH_SETTLE_MS) };
       }
     })();
 
@@ -792,8 +850,9 @@ async function runCapture() {
       if (performance.now() - t0 > durationMs) break;
 
       const elapsed = performance.now() - t0;
-      const { light, torch } = active;
-      const shot = shotLight(light, torch);
+      settle();
+      const { light, torch } = shown;
+      const shot = pending ? CHANGING : shotLight(light, torch);
 
       ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh);
       applySoft(ctx, canvas.width, canvas.height, softLevel(light));
@@ -829,6 +888,11 @@ async function runCapture() {
     state.photos = state.photos.filter(p => p.blob);
     state.cameraFrames = video.requestVideoFrameCallback ? frames : null;
     state.burstMs = burstMs;
+    // The real strobe speed: a slow phone may not manage the chosen one.
+    const gaps = torchSwitches.slice(1).map((t, k) => t - torchSwitches[k]);
+    state.strobe = strobe && gaps.length >= 2
+      ? { planned: phaseMs, measured: gaps.reduce((a, b) => a + b, 0) / gaps.length }
+      : null;
 
     if (spin) {
       hud('Saving photos…', 'Turntable finishing its spin');
@@ -913,6 +977,14 @@ function updateGalleryCount() {
     const fps = Math.round(state.cameraFrames / (state.burstMs / 1000));
     text += `. Your camera ran at about ${fps} frames per second, so about ${state.cameraFrames} of them are different and the rest are repeats`;
   }
+  if (state.strobe) {
+    // Level changes fall between strobe switches, so the measured average reads a bit shorter; allow for it.
+    const slow = state.strobe.measured > state.strobe.planned * 1.3;
+    text += ` · flashlight on/off about every ${fmtStrobe(Math.round(state.strobe.measured / 10) * 10)}`;
+    if (slow) text += ` (slower than ${fmtStrobe(state.strobe.planned)}: this phone can't switch it faster)`;
+  }
+  const changing = state.photos.filter(p => p.light === CHANGING.id).length;
+  if (changing) text += ` · ${changing} taken while the light was switching are labelled "${CHANGING.id}"`;
   text += removed ? ` · ${removed} will be removed` : ' · tap a photo to remove it';
   $('#gallery-count').textContent = text;
   $('#gallery-next').disabled = keptPhotos().length === 0;
@@ -924,6 +996,7 @@ function clearPhotos() {
   state.zipBlob = null;
   state.burstMs = 0;
   state.cameraFrames = null;
+  state.strobe = null;
 }
 
 $('#gallery-restart').addEventListener('click', () => {
