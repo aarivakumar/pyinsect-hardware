@@ -22,10 +22,10 @@ const CAMERA_LIGHTS = [
   { id: 'dark',        label: 'Dark',            ev: -2,   soft: -0.6 },
   { id: 'bright',      label: 'Bright',          ev: 1,    soft: 0.25 },
   { id: 'verybright',  label: 'Very bright',     ev: 2,    soft: 0.5 },
-  { id: 'flash',       label: 'Flashlight',      ev: 0,    soft: 0,     torch: true },
-  { id: 'flashdim',    label: 'Flashlight dim',  ev: -1.5, soft: -0.4,  torch: true },
-  { id: 'flashbright', label: 'Flashlight bright', ev: 1.5, soft: 0.35, torch: true },
 ];
+// The flashlight strobes on, off, on, off... through the whole burst, on top of the levels above,
+// so every angle and every level gets photos both with and without the flashlight.
+const STROBE_MS = 400;        // flashlight stays on this long, then off this long
 // No flashlight (laptop webcam / front camera): the screen glows in different colours and levels.
 const SCREEN_LIGHTS = [
   { id: 'white',  label: 'Screen white',  screen: '#ffffff' },
@@ -478,16 +478,20 @@ function stopCamera() {
 
 function autoLights() {
   // Phones often report the flashlight only after frames start flowing — caps are re-read in startCamera.
-  return state.caps.torch || state.caps.exposureCompensation ? CAMERA_LIGHTS.filter(l => state.caps.torch || !l.torch)
-       : (state.facingUser ? SCREEN_LIGHTS : CAMERA_LIGHTS.filter(l => !l.torch));
+  return state.caps.torch || state.caps.exposureCompensation || !state.facingUser ? CAMERA_LIGHTS : SCREEN_LIGHTS;
 }
 
-// Returns true once the hardware has been told to change. The software part is applied per photo.
-async function applyLight(light) {
+// The id and label saved with a photo, e.g. "dim_flash" / "Dim + flashlight".
+function shotLight(light, torch) {
+  return torch ? { id: `${light.id}_flash`, label: `${light.label} + flashlight` } : { id: light.id, label: light.label };
+}
+
+// Resolves once the hardware has been told to change. The software part is applied per photo.
+async function applyLight(light, torch = false) {
   $('#light-overlay').style.background = (light && light.screen) || '#000';
   if (!state.track || (light && light.screen)) return;
   const adv = {};
-  if (state.caps.torch) adv.torch = !!(light && light.torch);
+  if (state.caps.torch) adv.torch = !!torch;
   if (state.caps.exposureCompensation) {
     const { min, max } = state.caps.exposureCompensation;
     adv.exposureCompensation = Math.max(min, Math.min(max, (light && light.ev) || 0));
@@ -559,6 +563,8 @@ async function runCapture() {
 
   let spun = 0;          // degrees the turntable turned during the burst
   let spin = null;       // promise for the continuous spin
+  let lighting = null;   // promise for the loop that changes the light and strobes the flashlight
+  let lightingDone = false;
   try {
     await startCamera();
     const lights = autoLights();
@@ -571,7 +577,8 @@ async function runCapture() {
     const durationMs = interval * 1000;
     const gapMs = durationMs / PHOTO_TARGET;        // 16 ms for 500 photos in 8 s
     const lightMs = durationMs / lights.length;     // each lighting gets an equal slice of the burst
-    let active = lights[0];                        // the light the camera is really showing right now
+    const strobe = !!state.caps.torch && !lights[0].screen;
+    let active = { light: lights[0], torch: false }; // what the camera is really showing right now
 
     // Count how many different frames the camera really delivers.
     let frames = 0, counting = true;
@@ -588,7 +595,24 @@ async function runCapture() {
 
     if (useTurntable) spin = turntable.spinFor(durationMs);
     const t0 = performance.now();
-    let lightIdx = 0;
+
+    // Runs beside the photo loop so the burst stays on time. One change at a time: the camera is told
+    // the new level and flashlight state, given LIGHT_SETTLE_MS to show it, and only then are photos
+    // labelled with it.
+    lighting = (async () => {
+      let cur = active;
+      while (!lightingDone && !state.abort) {
+        const elapsed = performance.now() - t0;
+        const want = {
+          light: lights[Math.min(lights.length - 1, Math.floor(elapsed / lightMs))],
+          torch: strobe && Math.floor(elapsed / STROBE_MS) % 2 === 0,
+        };
+        if (want.light === cur.light && want.torch === cur.torch) { await sleep(5); continue; }
+        await applyLight(want.light, want.torch);
+        await sleep(LIGHT_SETTLE_MS);
+        cur = active = want;
+      }
+    })();
 
     for (let i = 0; i < PHOTO_TARGET && !state.abort; i++) {
       const due = t0 + i * gapMs;
@@ -596,18 +620,13 @@ async function runCapture() {
       if (early > 1) await sleep(early);
 
       const elapsed = performance.now() - t0;
-      const li = Math.min(lights.length - 1, Math.floor(elapsed / lightMs));
-      if (li !== lightIdx) { // don't wait, keep the burst on time
-        lightIdx = li;
-        const next = lights[li];
-        applyLight(next).then(() => sleep(LIGHT_SETTLE_MS)).then(() => { if (lights[lightIdx] === next) active = next; });
-      }
-      const light = active;
+      const { light, torch } = active;
+      const shot = shotLight(light, torch);
 
       ctx.drawImage(video, 0, 0);
       applySoft(ctx, canvas.width, canvas.height, softLevel(light));
       const angle = useTurntable ? Math.round(((elapsed / turntable.info.ms) * 360 % 360) * 10) / 10 : 0;
-      const photo = { blob: null, url: '', angle, light: light.id, lightLabel: light.label, time: new Date(), removed: false };
+      const photo = { blob: null, url: '', angle, light: shot.id, lightLabel: shot.label, time: new Date(), removed: false };
       state.photos.push(photo);
       // toBlob copies the canvas now and encodes in the background, so the next photo isn't delayed.
       encoding.push(new Promise(res => canvas.toBlob(b => {
@@ -617,7 +636,7 @@ async function runCapture() {
 
       if (i % 8 === 0) {
         hudProgress(i + 1, PHOTO_TARGET);
-        hud(`${Math.max(0, (durationMs - elapsed) / 1000).toFixed(1)} s`, `${light.label} · ${i + 1} photos`);
+        hud(`${Math.max(0, (durationMs - elapsed) / 1000).toFixed(1)} s`, `${shot.label} · ${i + 1} photos`);
       }
       if (i % 25 === 0) {
         const n = encoding.length - 1;
@@ -628,6 +647,8 @@ async function runCapture() {
     counting = false;
     hudProgress(state.photos.length, PHOTO_TARGET);
     hud('Saving photos…', `${state.photos.length} photos in ${(burstMs / 1000).toFixed(1)} s`);
+    lightingDone = true;
+    await lighting;
     applyLight(null);
 
     await Promise.all(encoding);
@@ -650,7 +671,9 @@ async function runCapture() {
   } finally {
     if (spin) spin.catch(() => {});
     if (useTurntable && state.abort) await turntable.stop();
-    await applyLight(null);
+    lightingDone = true;
+    if (lighting) await lighting.catch(() => {});
+    await applyLight(null);   // flashlight off, after the strobe loop has stopped so it can't turn it back on
     stopCamera();
     try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (_) {}
     await keepScreenOn(false);
