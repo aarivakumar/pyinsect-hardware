@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#14241b">
   <title>PyInsect</title>
   <!-- Bump ?v= whenever app.js or style.css changes, so phones load the new copy instead of a cached one. -->
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=4">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-  <script src="app.js?v=3" defer></script>
+  <script src="app.js?v=4" defer></script>
 </head>
 <body>
 
@@ -20,13 +20,17 @@
   </header>
 
   <ol class="steps">
-    <li><b>1 · Capture</b>500 photos are taken while the turntable spins and the lighting changes (dim, dark, bright, flashlight).</li>
+    <li><b>1 · Capture</b>Zoom in on the bug, then the photos are taken while the turntable spins and the lighting changes (dim, dark, bright, flashlight).</li>
     <li><b>2 · Review</b>Look through the photos. Tap one to remove it.</li>
     <li><b>3 · Save</b>Name the folder after the insect and save it as a .zip.</li>
   </ol>
 
   <div class="launch">
     <button id="capture" class="primary big">Take photos</button>
+    <label class="slider">
+      <span>Photos <output id="count-out">500</output></span>
+      <input type="range" id="count" min="50" max="1000" step="50" value="500">
+    </label>
     <label class="slider">
       <span>Time <output id="interval-out">8 s</output></span>
       <input type="range" id="interval" min="4" max="30" step="1" value="8">
@@ -64,7 +68,8 @@
 <!-- ============ CAPTURE ============ -->
 <main id="screen-camera" class="screen camera">
   <div id="light-overlay" aria-hidden="true"></div>
-  <video id="video" playsinline muted autoplay></video>
+  <div id="preview" class="preview"><video id="video" playsinline muted autoplay></video></div>
+  <div id="frame-guide" class="frame-guide" aria-hidden="true" hidden></div>
   <span id="run-tt" class="glass run-pill"></span>
   <img id="last-shot" class="last-shot" alt="" hidden>
 
@@ -76,6 +81,13 @@
     <div class="bar"><div id="hud-bar"></div></div>
     <p id="hud-main" class="hud-main">Starting camera…</p>
     <p id="hud-sub" class="hud-sub"></p>
+    <div id="frame-controls" class="frame-controls" hidden>
+      <label class="slider">
+        <span>Zoom <output id="zoom-out">1.0×</output></span>
+        <input type="range" id="zoom" min="1" max="4" step="0.1" value="1">
+      </label>
+      <button id="start-burst" class="primary wide">Start</button>
+    </div>
     <button id="stop" class="danger wide">Stop</button>
   </section>
 </main>
